@@ -28,7 +28,7 @@ function logError(message, error) {
 
 document.addEventListener('DOMContentLoaded', async () => {
     if (typeof axios === 'undefined') {
-        alert('Axios 库未正确载，请检查网络连页面。');
+        alert('Axios 库未正确载，络页面。');
         return;
     }
 
@@ -41,6 +41,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const uploadBtn = document.getElementById('upload-btn');
     const fileList = document.getElementById('files');
     const selectedFilesDiv = document.getElementById('selected-files');
+    const selectAllCheckbox = document.getElementById('select-all-files');
+    const batchDeleteBtn = document.getElementById('batch-delete-btn');
 
     fileInput.addEventListener('change', () => {
         selectedFilesDiv.innerHTML = '';
@@ -59,12 +61,56 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         for (let file of files) {
-            await uploadFile(file);
+            try {
+                await uploadFile(file);
+            } catch (error) {
+                console.error('上传文件时发生错误:', error);
+                showNotification(`上传 ${file.name} 失败: ${error.message}`, 'error');
+            }
         }
 
         fileInput.value = '';
         document.getElementById('selected-files').innerHTML = '';
     });
+
+    selectAllCheckbox.addEventListener('change', () => {
+        const checkboxes = document.querySelectorAll('#files input[type="checkbox"]');
+        checkboxes.forEach(checkbox => {
+            checkbox.checked = selectAllCheckbox.checked;
+        });
+        updateBatchDeleteButton();
+    });
+
+    batchDeleteBtn.addEventListener('click', () => {
+        const selectedFiles = document.querySelectorAll('#files input[type="checkbox"]:checked');
+        if (selectedFiles.length === 0) {
+            showNotification('请选择要删除的文件', 'warning');
+            return;
+        }
+        showConfirmModal(`确定要删除选中的 ${selectedFiles.length} 个文件吗？`, () => {
+            batchDeleteFiles(selectedFiles);
+        });
+    });
+
+    function updateBatchDeleteButton() {
+        const selectedFiles = document.querySelectorAll('#files input[type="checkbox"]:checked');
+        batchDeleteBtn.style.display = selectedFiles.length > 0 ? 'inline-block' : 'none';
+    }
+
+    async function batchDeleteFiles(selectedFiles) {
+        for (const checkbox of selectedFiles) {
+            const fileName = checkbox.dataset.filename;
+            const fileSha = checkbox.dataset.sha;
+            try {
+                await deleteFile(fileName, fileSha, false);
+            } catch (error) {
+                console.error(`删除文件 ${fileName} 失败:`, error);
+                showNotification(`删除 ${fileName} 失败: ${error.message}`, 'error');
+            }
+        }
+        loadFiles();
+        showNotification('批量删除完成', 'info');
+    }
 
     // 页面加载时自验证
     await verifyToken();
@@ -119,6 +165,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                         console.log('File details:', file);
                         const li = document.createElement('li');
                         
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.dataset.filename = file.name;
+                        checkbox.dataset.sha = file.sha;
+                        checkbox.addEventListener('change', updateBatchDeleteButton);
+                        
                         const fileInfo = document.createElement('div');
                         fileInfo.className = 'file-info';
                         fileInfo.textContent = file.name;
@@ -139,18 +191,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                         buttonContainer.appendChild(downloadBtn);
                         buttonContainer.appendChild(deleteBtn);
                         
+                        li.appendChild(checkbox);
                         li.appendChild(fileInfo);
                         li.appendChild(buttonContainer);
                         fileList.appendChild(li);
                     }
                 });
             }
+            updateBatchDeleteButton();
         } catch (error) {
             logError('加载文件列表失败:', error);
-            if (error.response) {
-                console.error('错误状态码:', error.response.status);
-                console.error('错误数:', error.response.data);
-            }
             if (error.response && error.response.status === 404) {
                 fileList.innerHTML = '<li>库为空或不存在</li>';
             } else {
@@ -159,56 +209,75 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    async function uploadFile(file) {
-        const progressBar = document.getElementById('upload-progress');
-        const progressElement = progressBar.querySelector('.progress');
-        
-        try {
+    function uploadFile(file) {
+        return new Promise((resolve, reject) => {
+            const progressBar = document.getElementById('upload-progress');
+            const progressElement = progressBar.querySelector('.progress');
+
             progressBar.style.display = 'block';
             progressElement.style.width = '0%';
             progressElement.textContent = '0%';
 
-            // 读取文件内
-            const fileContent = await readFileAsArrayBuffer(file);
-            const base64Content = arrayBufferToBase64(fileContent);
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const base64Content = e.target.result.split(',')[1];
+                
+                const data = {
+                    access_token: token,
+                    content: base64Content,
+                    message: `Upload ${file.name}`,
+                    branch: 'master'
+                };
 
-            // 准备请求数据
-            const data = {
-                access_token: token,
-                content: base64Content,
-                message: `Upload ${file.name}`,
-                branch: 'master'
+                try {
+                    const response = await axios.post(
+                        `https://gitee.com/api/v5/repos/${owner}/${cloudRepo}/contents/${file.name}`,
+                        data,
+                        {
+                            onUploadProgress: (progressEvent) => {
+                                const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                                progressElement.style.width = percentCompleted + '%';
+                                progressElement.textContent = percentCompleted + '%';
+                            }
+                        }
+                    );
+
+                    progressElement.style.width = '100%';
+                    progressElement.textContent = '100%';
+                    setTimeout(() => {
+                        progressBar.style.display = 'none';
+                    }, 1000);
+                    showNotification(`${file.name} 上传成功！`, 'info');
+                    loadFiles();
+                    resolve();
+                } catch (error) {
+                    progressBar.style.display = 'none';
+                    reject(error);
+                }
             };
 
-            // 发送请求
-            const response = await axios.post(
-                `https://gitee.com/api/v5/repos/${owner}/${cloudRepo}/contents/${file.name}`,
-                data,
-                {
-                    onUploadProgress: (progressEvent) => {
-                        const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-                        progressElement.style.width = percentCompleted + '%';
-                        progressElement.textContent = percentCompleted + '%';
-                    }
+            reader.onerror = (error) => {
+                reject(error);
+            };
+
+            reader.readAsDataURL(file);
+        });
+    }
+
+    async function getFileSha(fileName) {
+        try {
+            const response = await axios.get(`https://gitee.com/api/v5/repos/${owner}/${cloudRepo}/contents/${fileName}`, {
+                params: { 
+                    access_token: token,
+                    ref: 'master'
                 }
-            );
-
-            progressElement.style.width = '100%';
-            progressElement.textContent = '100%';
-            setTimeout(() => {
-                progressBar.style.display = 'none';
-            }, 1000);
-
-            showNotification(`${file.name} 上传成功！`, 'info');
-            loadFiles();
+            });
+            return response.data.sha;
         } catch (error) {
-            progressBar.style.display = 'none';
-            logError('上传文件失败:', error);
-            if (error.response) {
-                console.error('错误状态码:', error.response.status);
-                console.error('错误数据:', error.response.data);
+            if (error.response && error.response.status === 404) {
+                return null; // 文件不存在
             }
-            showNotification(`上传 ${file.name} 失败，错误: ${error.message}`, 'error');
+            throw error;
         }
     }
 
@@ -296,7 +365,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                 return true;
             }
             console.error('网络连接失败:', error);
-            showNotification('网络连接失败，请检查您的网络设置', 'error');
+            showNotification('网络连接失败，请检查您的网络设', 'error');
             return false;
         }
     }
@@ -337,8 +406,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    async function deleteFile(fileName, fileSha) {
-        showConfirmModal(`确定要删除文件 "${fileName}" 吗？`, async () => {
+    async function deleteFile(fileName, fileSha, showConfirmation = true) {
+        const deleteAction = async () => {
             try {
                 const response = await axios.delete(`https://gitee.com/api/v5/repos/${owner}/${cloudRepo}/contents/${fileName}`, {
                     params: { access_token: token },
@@ -349,16 +418,20 @@ document.addEventListener('DOMContentLoaded', async () => {
                     }
                 });
                 showNotification(`${fileName} 删除成功！`, 'info');
-                loadFiles(); // 重新加载文件列表
+                if (showConfirmation) {
+                    loadFiles(); // 仅在单个删除时重新加载文件列表
+                }
             } catch (error) {
                 logError('删除文件失败:', error);
-                if (error.response) {
-                    console.error('错误状态码:', error.response.status);
-                    console.error('错误数据:', error.response.data);
-                }
-                showNotification(`删除 ${fileName} 失败，错误: ${error.message}`, 'error');
+                throw error;
             }
-        });
+        };
+
+        if (showConfirmation) {
+            showConfirmModal(`确定要删除文件 "${fileName}" 吗？`, deleteAction);
+        } else {
+            await deleteAction();
+        }
     }
 
     // 新的辅助函数，用于高效地将 ArrayBuffer 转换为 Base64
@@ -397,9 +470,89 @@ document.addEventListener('DOMContentLoaded', async () => {
             });
         }, 3000);
     }
+
+    function updateSelectAllCheckbox() {
+        const allCheckboxes = document.querySelectorAll('#files input[type="checkbox"]');
+        const checkedCheckboxes = document.querySelectorAll('#files input[type="checkbox"]:checked');
+        const selectAllCheckbox = document.getElementById('select-all-files');
+        
+        selectAllCheckbox.checked = allCheckboxes.length > 0 && allCheckboxes.length === checkedCheckboxes.length;
+        selectAllCheckbox.indeterminate = checkedCheckboxes.length > 0 && checkedCheckboxes.length < allCheckboxes.length;
+    }
+
+    function createFileListItem(file) {
+        const li = document.createElement('li');
+        
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.dataset.filename = file.name;
+        checkbox.dataset.sha = file.sha;
+        checkbox.addEventListener('change', () => {
+            updateBatchDeleteButton();
+            updateSelectAllCheckbox();
+        });
+        
+        const fileInfo = document.createElement('div');
+        fileInfo.className = 'file-info';
+        fileInfo.textContent = file.name;
+        
+        const buttonContainer = document.createElement('div');
+        buttonContainer.className = 'button-container';
+        
+        const downloadBtn = document.createElement('button');
+        downloadBtn.textContent = '下载';
+        downloadBtn.className = 'download-btn';
+        downloadBtn.onclick = () => downloadFileWithRetry(file.name, file.path);
+        
+        const deleteBtn = document.createElement('button');
+        deleteBtn.textContent = '删除';
+        deleteBtn.className = 'delete-btn';
+        deleteBtn.onclick = () => deleteFile(file.name, file.sha);
+        
+        buttonContainer.appendChild(downloadBtn);
+        buttonContainer.appendChild(deleteBtn);
+        
+        li.appendChild(checkbox);
+        li.appendChild(fileInfo);
+        li.appendChild(buttonContainer);
+        return li;
+    }
+
+    async function loadFiles() {
+        try {
+            const response = await axios.get(`https://gitee.com/api/v5/repos/${owner}/${cloudRepo}/contents`, {
+                params: { 
+                    access_token: token,
+                    ref: 'master'
+                }
+            });
+            console.log('API response:', response.data);
+            fileList.innerHTML = '';
+            if (response.data.length === 0) {
+                fileList.innerHTML = '<li>云盘为空</li>';
+            } else {
+                response.data.forEach(file => {
+                    if (file.type === 'file') {
+                        console.log('File details:', file);
+                        const li = createFileListItem(file);
+                        fileList.appendChild(li);
+                    }
+                });
+            }
+            updateBatchDeleteButton();
+            updateSelectAllCheckbox();
+        } catch (error) {
+            logError('加载文件列表失败:', error);
+            if (error.response && error.response.status === 404) {
+                fileList.innerHTML = '<li>库为空或不存在</li>';
+            } else {
+                showNotification(`加载文件列表失败，错误: ${error.message}`, 'error');
+            }
+        }
+    }
 });
 
 window.onerror = function(message, source, lineno, colno, error) {
     console.error('全局错误:', message, source, lineno, colno, error);
-    showNotification(`发了一个错误: ${message}`, 'error');
+    showNotification(`发生了一个错误: ${message}`, 'error');
 };
